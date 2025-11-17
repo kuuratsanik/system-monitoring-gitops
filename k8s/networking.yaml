@@ -6,8 +6,27 @@ data:
   nginx.conf: |
     events {}
     http {
+      # ArgoCD Server
       server {
         listen 80;
+        server_name argocd.local;
+        location / {
+          proxy_pass http://argocd-server:8080;
+        }
+      }
+
+      # Grafana Server
+      server {
+        listen 80;
+        server_name grafana.local;
+        location / {
+          proxy_pass http://grafana-service:3000;
+        }
+      }
+
+      # Default catch-all server
+      server {
+        listen 80 default_server;
         location / {
           proxy_pass http://haproxy:8080;
         }
