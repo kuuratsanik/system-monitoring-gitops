@@ -11,7 +11,7 @@ data:
         listen 80;
         server_name argocd.local;
         location / {
-          proxy_pass http://argocd-server:8080;
+          proxy_pass http://argocd-server.argocd:80;
         }
       }
 
@@ -20,7 +20,7 @@ data:
         listen 80;
         server_name grafana.local;
         location / {
-          proxy_pass http://grafana-service:3000;
+          proxy_pass http://grafana:3000;
         }
       }
 
