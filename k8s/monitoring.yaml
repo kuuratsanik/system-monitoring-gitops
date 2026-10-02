@@ -18,7 +18,8 @@ data:
           - targets: ['redis-exporter:9121']
       - job_name: 'app'
         static_configs:
-          - targets: ['app:5000'] # Assuming the app will run on port 5000
+          # NOTE: load-balanced over replicas with per-process metrics; pod discovery (kubernetes_sd_configs, needs RBAC) would be more accurate.
+          - targets: ['app-service:5000'] # app-service exposes a named metrics port 5000 -> /metrics
 ---
 apiVersion: apps/v1
 kind: Deployment
