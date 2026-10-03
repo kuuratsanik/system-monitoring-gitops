@@ -68,7 +68,13 @@ spec:
   - protocol: TCP
     port: 80
     targetPort: 80
-  type: LoadBalancer
+    # Pinned so host-side relays survive Service recreation. Outside the
+    # 30001-30032 range used by the other fleet services.
+    nodePort: 30080
+  # NodePort, not LoadBalancer: the kind cluster has no load balancer, so a
+  # LoadBalancer Service never gets an external IP and Argo CD reports the app
+  # as Progressing forever. Reach it at http://<node-ip>:30080.
+  type: NodePort
   # Preserve the client source IP (needed for per-IP rate limiting). Tradeoff:
   # traffic is only routed to nodes that run an nginx pod.
   externalTrafficPolicy: Local
