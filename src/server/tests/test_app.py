@@ -11,6 +11,7 @@ from app import (
     RATE_LIMIT_KEY_PREFIX,
     VISITS_KEY,
     create_app,
+    make_redis_client,
 )
 
 
@@ -415,3 +416,229 @@ def test_static_traversal(ok, path):
     r = ok.get(path, follow_redirects=True)
     assert r.status_code in (400, 404)
     assert b"secret" not in r.data and b"root:" not in r.data
+
+
+# ---- audit fixes ----
+
+
+def test_redis_client_has_no_retries():
+    assert make_redis_client().get_retry()._retries == 0
+
+
+def test_redis_client_password_from_env(monkeypatch):
+    monkeypatch.setenv("REDIS_PASSWORD", "s3cret")
+    kw = make_redis_client().connection_pool.connection_kwargs
+    assert kw["password"] == "s3cret"
+    monkeypatch.setenv("REDIS_PASSWORD", "")
+    assert make_redis_client().connection_pool.connection_kwargs["password"] is None
+    monkeypatch.delenv("REDIS_PASSWORD")
+    assert make_redis_client().connection_pool.connection_kwargs["password"] is None
+
+
+def test_metrics_method_label_bounded(ok):
+    for m in ("FOO", "BAR", "PROPFIND"):
+        ok.open("/live", method=m)
+    ok.get("/live")
+    body = ok.get("/metrics").get_data(as_text=True)
+    lines = [l for l in body.splitlines()
+             if l.startswith(("http_requests_total{", "http_request_duration_seconds"))]
+    methods = {l.split('method="')[1].split('"')[0] for l in lines}
+    assert methods == {"GET", "OTHER"}
+    for m in ("FOO", "BAR", "PROPFIND"):
+        assert f'method="{m}"' not in body
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("1.2.3.4", "1.2.3.4"),
+        ("  1.2.3.4  ", "1.2.3.4"),
+        ("2001:DB8:0:0:0:0:0:1", "2001:db8::1"),
+        ("::1", "::1"),
+        ("not-an-ip", "REMOTE"),
+        ("1.2.3.4, 5.6.7.8", "REMOTE"),
+        ("1.2.3.4:80", "REMOTE"),
+        ("a" * 100, "REMOTE"),
+        ("1" * 46, "REMOTE"),
+        ("0" * 40 + "::1", "REMOTE"),
+    ],
+)
+def test_client_ip_header_validation(monkeypatch, client_dir, value, expected):
+    monkeypatch.setenv("VISITS_CLIENT_IP_HEADER", "X-Real-IP")
+    rdb = fakeredis.FakeRedis(decode_responses=True)
+    c = create_app(rdb, str(client_dir)).test_client()
+    assert c.post("/api/visits", headers={"X-Real-IP": value}).status_code == 200
+    keys = list(rdb.scan_iter(f"{RATE_LIMIT_KEY_PREFIX}*"))
+    assert len(keys) == 1
+    got = keys[0].decode() if isinstance(keys[0], bytes) else keys[0]
+    got = got[len(RATE_LIMIT_KEY_PREFIX):]
+    assert got == ("127.0.0.1" if expected == "REMOTE" else expected)
+
+
+def _wrongtype_app(client_dir):
+    rdb = fakeredis.FakeRedis(decode_responses=True)
+    rdb.lpush(VISITS_KEY, "x")  # INCR/GET on a list -> WRONGTYPE ResponseError
+    return rdb, create_app(rdb, str(client_dir))
+
+
+def test_visits_wrongtype_is_store_error_not_outage(monkeypatch, client_dir):
+    monkeypatch.setenv("VISITS_RATE_LIMIT", "5")
+    rdb, app = _wrongtype_app(client_dir)
+    c = app.test_client()
+    assert c.get("/health").status_code == 200  # redis_up -> 1
+    r = c.post("/api/visits")
+    assert r.status_code == 503
+    assert r.get_json() == {"error": "visits store error"}
+    body = generate_latest(app.extensions["prometheus_registry"]).decode()
+    assert "redis_up 1.0" in body
+    assert "visits_store_errors_total 1.0" in body
+    # rate-limit charge rolled back
+    rl = list(rdb.scan_iter(f"{RATE_LIMIT_KEY_PREFIX}*"))
+    assert len(rl) == 1 and int(rdb.get(rl[0])) == 0
+
+
+def test_visits_connection_error_does_not_count_store_error(client_dir):
+    app = create_app(VisitIncrFailRedis(), str(client_dir))
+    assert app.test_client().post("/api/visits").get_json() == {"error": "redis unavailable"}
+    body = generate_latest(app.extensions["prometheus_registry"]).decode()
+    assert "visits_store_errors_total 0.0" in body
+    assert "redis_up 0.0" in body
+
+
+def test_visits_timeout_error_is_outage(client_dir):
+    class TimeoutIncr(VisitIncrFailRedis):
+        def incr(self, name, *a, **k):
+            if name == VISITS_KEY:
+                raise redis.TimeoutError("slow")
+            return self._inner.incr(name, *a, **k)
+
+    app = create_app(TimeoutIncr(), str(client_dir))
+    r = app.test_client().post("/api/visits")
+    assert r.status_code == 503
+    assert r.get_json() == {"error": "redis unavailable"}
+    body = generate_latest(app.extensions["prometheus_registry"]).decode()
+    assert "redis_up 0.0" in body
+
+
+def test_status_wrongtype_keeps_connected(client_dir):
+    rdb, app = _wrongtype_app(client_dir)
+    j = app.test_client().get("/api/status").get_json()
+    assert j["redis"] == {"connected": True}
+    assert j["visits"] is None
+    body = generate_latest(app.extensions["prometheus_registry"]).decode()
+    assert "redis_up 1.0" in body
+
+
+def test_status_get_timeout_marks_down(client_dir):
+    class TimeoutGet:
+        def __init__(self):
+            self._inner = fakeredis.FakeRedis(decode_responses=True)
+
+        def get(self, *a, **k):
+            raise redis.TimeoutError("slow")
+
+        def __getattr__(self, n):
+            return getattr(self._inner, n)
+
+    app = create_app(TimeoutGet(), str(client_dir))
+    j = app.test_client().get("/api/status").get_json()
+    assert j["redis"] == {"connected": False}
+    assert j["visits"] is None
+
+
+def test_retry_after_uses_pttl_near_expiry(monkeypatch, client_dir):
+    monkeypatch.setenv("VISITS_RATE_LIMIT", "1")
+    monkeypatch.setenv("VISITS_RATE_WINDOW_SECONDS", "60")
+    rdb = fakeredis.FakeRedis(decode_responses=True)
+    c = create_app(rdb, str(client_dir)).test_client()
+    assert c.post("/api/visits").status_code == 200
+    key = list(rdb.scan_iter(f"{RATE_LIMIT_KEY_PREFIX}*"))[0]
+    rdb.pexpire(key, 150)  # sub-second remainder must round up to 1, not 0
+    r = c.post("/api/visits")
+    assert r.status_code == 429
+    assert r.headers["Retry-After"] == "1"
+    rdb.pexpire(key, 2500)
+    assert c.post("/api/visits").headers["Retry-After"] == "3"
+
+
+def test_retry_after_no_expiry_uses_window(monkeypatch, client_dir):
+    monkeypatch.setenv("VISITS_RATE_LIMIT", "1")
+    monkeypatch.setenv("VISITS_RATE_WINDOW_SECONDS", "42")
+
+    class NoExpiry:
+        def eval(self, *a, **k):
+            return [-1, -1]  # over limit, key without expiry
+
+    r = create_app(NoExpiry(), str(client_dir)).test_client().post("/api/visits")
+    assert r.status_code == 429
+    assert r.headers["Retry-After"] == "42"
+
+
+def test_retry_after_single_round_trip(monkeypatch, client_dir):
+    monkeypatch.setenv("VISITS_RATE_LIMIT", "1")
+    inner = fakeredis.FakeRedis(decode_responses=True)
+
+    class NoTtl:
+        def __getattr__(self, n):
+            if n in ("ttl", "pttl"):
+                raise AssertionError("no second round trip expected")
+            return getattr(inner, n)
+
+    c = create_app(NoTtl(), str(client_dir)).test_client()
+    c.post("/api/visits")
+    assert c.post("/api/visits").status_code == 429
+
+
+@pytest.mark.parametrize("path", ["/", "/api/status", "/live", "/nope"])
+def test_security_headers(ok, path):
+    r = ok.get(path)
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert r.headers["X-Frame-Options"] == "DENY"
+    assert r.headers["Referrer-Policy"] == "no-referrer"
+    assert r.headers["Content-Security-Policy"] == (
+        "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    )
+
+
+def test_auth_error_is_connection_error_subclass():
+    # Auth failures therefore map to the outage path (redis_up 0 / 503 unavailable).
+    assert issubclass(redis.AuthenticationError, redis.ConnectionError)
+
+
+def _bucket(monkeypatch, client_dir, header_value=None, **kw):
+    monkeypatch.setenv("VISITS_CLIENT_IP_HEADER", "X-Real-IP")
+    rdb = fakeredis.FakeRedis(decode_responses=True)
+    app = create_app(rdb, str(client_dir))
+    headers = {"X-Real-IP": header_value} if header_value is not None else {}
+    assert app.test_client().post("/api/visits", headers=headers, **kw).status_code == 200
+    key = list(rdb.scan_iter(f"{RATE_LIMIT_KEY_PREFIX}*"))[0]
+    key = key.decode() if isinstance(key, bytes) else key
+    return key[len(RATE_LIMIT_KEY_PREFIX):], app
+
+
+def test_client_ip_45_char_boundary_and_mapped(monkeypatch, client_dir):
+    v = "0000:0000:0000:0000:0000:ffff:255.255.255.255"
+    assert len(v) == 45
+    assert _bucket(monkeypatch, client_dir, v)[0] == "255.255.255.255"
+    assert _bucket(monkeypatch, client_dir, "::ffff:1.2.3.4")[0] == "1.2.3.4"
+
+
+def test_client_ip_scope_id_stripped(monkeypatch, client_dir):
+    assert _bucket(monkeypatch, client_dir, "fe80::1%eth0")[0] == "fe80::1"
+
+
+def test_remote_addr_normalised(monkeypatch, client_dir):
+    got, _ = _bucket(monkeypatch, client_dir, environ_base={"REMOTE_ADDR": "::ffff:9.9.9.9"})
+    assert got == "9.9.9.9"
+
+
+def test_client_ip_invalid_counter(monkeypatch, client_dir):
+    monkeypatch.setenv("VISITS_CLIENT_IP_HEADER", "X-Real-IP")
+    app = create_app(fakeredis.FakeRedis(decode_responses=True), str(client_dir))
+    c = app.test_client()
+    c.post("/api/visits", headers={"X-Real-IP": "junk"})
+    c.post("/api/visits", headers={"X-Real-IP": "a" * 100})
+    c.post("/api/visits", headers={"X-Real-IP": "1.2.3.4"})  # valid
+    c.post("/api/visits")  # absent
+    body = generate_latest(app.extensions["prometheus_registry"]).decode()
+    assert "visits_client_ip_header_invalid_total 2.0" in body
