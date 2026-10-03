@@ -29,7 +29,8 @@ spec:
         - name: APP_VERSION
           value: sha-7d7c883eb18ccbd084b0ef935113fc3bb9f5f1bf
         # Redis is a soft dependency: the app serves in degraded mode without it.
-        # Probes therefore use /api/status (always 200 while the process is up),
+        # Liveness uses /live (no Redis) so a hung Redis cannot kill pods.
+        # Readiness uses /api/status (always 200 while the process is up),
         # not /health (503 when Redis is down), so a Redis outage neither empties
         # the Service nor restarts pods.
         readinessProbe:
@@ -42,7 +43,7 @@ spec:
           failureThreshold: 2
         livenessProbe:
           httpGet:
-            path: /api/status
+            path: /live
             port: http
           initialDelaySeconds: 15
           periodSeconds: 10
