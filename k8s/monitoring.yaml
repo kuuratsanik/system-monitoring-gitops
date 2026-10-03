@@ -59,6 +59,14 @@ data:
       - job_name: 'redis-exporter'
         static_configs:
           - targets: ['redis-exporter:9121']
+      # The physical host's own node-exporter (loopback-only), reached through the
+      # host's fleet-portmap relay on the kind network gateway. Environment-specific:
+      # this target is down on any cluster that is not the local kind fleet.
+      - job_name: 'host'
+        static_configs:
+          - targets: ['172.18.0.1:9100']
+            labels:
+              instance: m93p
       - job_name: 'app'
         kubernetes_sd_configs:
           - role: pod
@@ -93,7 +101,7 @@ spec:
       annotations:
         # Config is mounted via subPath (no live reload): bump this whenever
         # the prometheus-config ConfigMap changes so the pod restarts.
-        checksum/config: "2"
+        checksum/config: "3"
     spec:
       serviceAccountName: prometheus
       containers:
