@@ -14,8 +14,7 @@ spec:
     spec:
       containers:
       - name: app
-        # NOTE: CI must build the root Dockerfile and push this image to GHCR
-        # (ghcr.io/kuuratsanik/system-monitoring-app:latest) or pods will ImagePullBackOff.
+        # Built and pushed by .github/workflows/app-image.yml on every push to main.
         image: ghcr.io/kuuratsanik/system-monitoring-app:latest
         imagePullPolicy: Always
         ports:
