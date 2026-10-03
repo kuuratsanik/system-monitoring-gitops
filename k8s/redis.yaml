@@ -17,6 +17,14 @@ spec:
         image: redis:7-alpine
         ports:
         - containerPort: 6379
+        env:
+        # Secret created out-of-band (never in git): redis-auth, key password.
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-auth
+              key: password
+        args: ["--requirepass", "$(REDIS_PASSWORD)"]
 ---
 apiVersion: v1
 kind: Service

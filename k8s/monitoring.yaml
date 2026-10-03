@@ -105,8 +105,7 @@ spec:
   - protocol: TCP
     port: 9090
     targetPort: 9090
-    nodePort: 30090
-  type: NodePort
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -127,6 +126,21 @@ spec:
         image: grafana/grafana-oss:10.2.2
         ports:
         - containerPort: 3000
+        env:
+        # Credentials come from a Secret created out-of-band (never in git):
+        # see the kubectl create secret command in the PR description.
+        - name: GF_SECURITY_ADMIN_USER
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: admin-user
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: admin-password
+        - name: GF_USERS_ALLOW_SIGN_UP
+          value: "false"
 ---
 apiVersion: v1
 kind: Service
@@ -139,8 +153,7 @@ spec:
   - protocol: TCP
     port: 3000
     targetPort: 3000
-    nodePort: 30000
-  type: NodePort
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment

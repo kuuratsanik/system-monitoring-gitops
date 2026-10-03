@@ -1,0 +1,43 @@
+# NetworkPolicies for the default namespace. Selectors match the pod-template
+# labels app=app, app=redis, app=haproxy, app=prometheus in the other manifests.
+# Kubelet liveness/readiness probes originate from the node and are not subject
+# to NetworkPolicy on mainstream CNIs (Calico, Cilium, etc.), so probes keep working.
+# Requires a CNI that enforces NetworkPolicy; otherwise these are silently ignored.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-allow-app
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: app
+    ports:
+    - protocol: TCP
+      port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-allow-haproxy-prometheus
+spec:
+  podSelector:
+    matchLabels:
+      app: app
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: haproxy
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 5000
