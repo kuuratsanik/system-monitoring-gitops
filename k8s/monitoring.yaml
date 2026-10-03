@@ -390,7 +390,8 @@ spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      storage: 10Gi
+      # Loki retention is time-based only (168h); size this above a week of logs.
+      storage: 50Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
