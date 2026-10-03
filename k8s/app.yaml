@@ -14,7 +14,8 @@ spec:
     spec:
       containers:
       - name: app
-        # Built and pushed by .github/workflows/app-image.yml on every push to main.
+        # Built and pushed by .github/workflows/app-image.yml on every push to main;
+        # its deploy job rewrites this tag (and APP_VERSION) to sha-<commit> so Argo CD rolls the pods.
         image: ghcr.io/kuuratsanik/system-monitoring-app:latest
         imagePullPolicy: Always
         ports:

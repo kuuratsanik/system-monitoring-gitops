@@ -18,7 +18,8 @@ on:
 
 concurrency:
   group: app-image-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a main run mid-deploy; superseded PR runs can go.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   IMAGE: ghcr.io/kuuratsanik/system-monitoring-app
@@ -70,3 +71,29 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Pin the new image in the manifest so Argo CD sees a change and rolls the pods.
+  # Pushes made with GITHUB_TOKEN don't trigger workflows, so this can't loop.
+  deploy:
+    needs: image
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Pin image tag in k8s/app.yaml
+        env:
+          TAG: sha-${{ github.sha }}
+        run: |
+          sed -i -E "s#(image: ${IMAGE}):.*#\1:${TAG}#" k8s/app.yaml
+          sed -i -E "/name: APP_VERSION/{n;s#value: .*#value: ${TAG}#}" k8s/app.yaml
+          git diff --exit-code k8s/app.yaml && { echo "Already pinned"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Deploy: app ${TAG}"
+          # main may have moved while the image built.
+          git pull --rebase origin main
+          git push origin HEAD:main
