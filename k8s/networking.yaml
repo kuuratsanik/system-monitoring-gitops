@@ -6,30 +6,20 @@ data:
   nginx.conf: |
     events {}
     http {
-      # ArgoCD Server
-      server {
-        listen 80;
-        server_name argocd.local;
-        location / {
-          proxy_pass http://argocd-server.argocd:80;
-        }
-      }
-
-      # Grafana Server
-      server {
-        listen 80;
-        server_name grafana.local;
-        location / {
-          proxy_pass http://grafana:3000;
-        }
-      }
-
-      # Default catch-all server
+      # Default catch-all server. Grafana and Argo CD are intentionally NOT
+      # exposed here; reach them with kubectl port-forward.
       server {
         listen 80 default_server;
+        # Do not expose Prometheus metrics publicly. Prometheus scrapes the
+        # app pods directly on port 5000, so this does not affect scraping.
+        location = /metrics {
+          return 404;
+        }
         location / {
           # Always overwritten, so clients cannot spoof it; HAProxy passes it through.
           proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header Host $host;
+          proxy_set_header X-Forwarded-Proto $scheme;
           proxy_pass http://haproxy:8080;
         }
       }
@@ -48,6 +38,10 @@ spec:
     metadata:
       labels:
         app: nginx
+      annotations:
+        # Config is mounted via subPath (no live reload): bump this whenever
+        # the nginx-config ConfigMap changes so the pod restarts.
+        checksum/config: "1"
     spec:
       containers:
       - name: nginx
