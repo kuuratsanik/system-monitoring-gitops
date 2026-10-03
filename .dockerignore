@@ -4,3 +4,7 @@ k8s
 **/.pytest_cache
 **/tests
 *.md
+**/.venv
+.github
+.claude
+.cursor

@@ -1,0 +1,98 @@
+# node-exporter on every node. The headless Service gives Prometheus one endpoint
+# per pod (see the node-exporter job, role: endpoints). The redis-exporter sidecar
+# and its Service live in redis.yaml.
+#
+# Needs hostPID and host /proc + /sys, so it will not run in a namespace enforcing
+# the baseline/restricted Pod Security Standard (the default namespace does not).
+# Host root (/) is deliberately NOT mounted, so the filesystem collector is disabled.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      hostPID: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: node-exporter
+        image: prom/node-exporter:v1.12.1
+        args:
+        - --path.procfs=/host/proc
+        - --path.sysfs=/host/sys
+        - --no-collector.filesystem
+        - --web.listen-address=:9100
+        ports:
+        - name: metrics
+          containerPort: 9100
+        readinessProbe:
+          httpGet:
+            path: /
+            port: metrics
+          periodSeconds: 10
+          timeoutSeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /
+            port: metrics
+          initialDelaySeconds: 10
+          periodSeconds: 20
+          timeoutSeconds: 3
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+      volumes:
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: sys
+        hostPath:
+          path: /sys
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+spec:
+  clusterIP: None
+  selector:
+    app: node-exporter
+  ports:
+  - name: metrics
+    protocol: TCP
+    port: 9100
+    targetPort: metrics
