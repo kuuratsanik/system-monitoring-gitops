@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Service Status</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>Service Status</h1>
+    <p id="overall" class="badge badge-unknown" role="status" aria-live="polite">Loading…</p>
+  </header>
+
+  <p id="error" class="error" role="alert" hidden></p>
+
+  <dl class="grid">
+    <div class="card"><dt id="l-service">Service</dt><dd id="service" aria-labelledby="l-service">–</dd></div>
+    <div class="card"><dt id="l-version">Version</dt><dd id="version" aria-labelledby="l-version">–</dd></div>
+    <div class="card"><dt id="l-uptime">Uptime</dt><dd id="uptime" aria-labelledby="l-uptime">–</dd></div>
+    <div class="card"><dt id="l-redis">Redis</dt><dd id="redis" aria-labelledby="l-redis" aria-live="polite">–</dd></div>
+    <div class="card"><dt id="l-visits">Visits</dt><dd id="visits" aria-labelledby="l-visits" aria-live="polite">–</dd></div>
+  </dl>
+
+  <div class="actions">
+    <button id="visit-btn" type="button">Record a visit</button>
+    <span id="visit-msg" class="hint" role="status" aria-live="polite"></span>
+  </div>
+  <p class="hint">Last updated: <span id="updated">never</span> · refreshes every 5 s</p>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
