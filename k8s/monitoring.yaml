@@ -37,9 +37,25 @@ data:
       - job_name: 'prometheus'
         static_configs:
           - targets: ['localhost:9090']
+      # One target per node (DaemonSet pods), labelled by node name. A Service
+      # would load-balance across nodes and mix their metrics.
       - job_name: 'node-exporter'
-        static_configs:
-          - targets: ['node-exporter:9100']
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [default]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: node-exporter
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: metrics
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Running
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: instance
       - job_name: 'redis-exporter'
         static_configs:
           - targets: ['redis-exporter:9121']
@@ -77,7 +93,7 @@ spec:
       annotations:
         # Config is mounted via subPath (no live reload): bump this whenever
         # the prometheus-config ConfigMap changes so the pod restarts.
-        checksum/config: "1"
+        checksum/config: "2"
     spec:
       serviceAccountName: prometheus
       containers:
@@ -186,3 +202,138 @@ spec:
   - protocol: TCP
     port: 3100
     targetPort: 3100
+---
+# Host metrics, one pod per node. hostNetwork is required for host network
+# stats (/proc/net is per network namespace); it also means :9100 listens on
+# each node's IP and NetworkPolicy does not apply, so keep node ports
+# firewalled from outside the cluster. Read-only host mounts, no hostPID.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      hostNetwork: true
+      automountServiceAccountToken: false
+      tolerations:
+      - operator: Exists
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+      containers:
+      - name: node-exporter
+        image: prom/node-exporter:v1.12.1
+        args:
+        - --path.procfs=/host/proc
+        - --path.sysfs=/host/sys
+        - --path.rootfs=/host/root
+        - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+|var/lib/kubelet/.+|var/lib/containerd/.+)($|/)
+        ports:
+        - name: metrics
+          containerPort: 9100
+        readinessProbe:
+          httpGet:
+            path: /
+            port: metrics
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+        - name: root
+          mountPath: /host/root
+          readOnly: true
+          mountPropagation: HostToContainer
+      volumes:
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: sys
+        hostPath:
+          path: /sys
+      - name: root
+        hostPath:
+          path: /
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-exporter
+  template:
+    metadata:
+      labels:
+        app: redis-exporter
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: redis-exporter
+        image: oliver006/redis_exporter:v1.93.0
+        env:
+        - name: REDIS_ADDR
+          value: redis://redis:6379
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-auth
+              key: password
+        ports:
+        - name: metrics
+          containerPort: 9121
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: metrics
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-exporter
+spec:
+  selector:
+    app: redis-exporter
+  ports:
+  - name: metrics
+    protocol: TCP
+    port: 9121
+    targetPort: 9121
+  type: ClusterIP
