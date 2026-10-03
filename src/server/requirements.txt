@@ -1,3 +1,8 @@
+# Human-edited input. The Dockerfile and CI install from the hash-pinned lock files, not this file.
+# After changing this file or requirements-dev.txt, regenerate both locks from src/server:
+#   uv pip compile requirements.txt --generate-hashes --python-version 3.12 -o requirements.lock
+#   uv pip compile requirements-dev.txt --generate-hashes --python-version 3.12 -o requirements-dev.lock
+# (pip-compile --generate-hashes works too.)
 Flask==3.1.3
 redis==8.1.0
 prometheus_client==0.26.0

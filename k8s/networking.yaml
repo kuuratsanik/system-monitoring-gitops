@@ -4,23 +4,50 @@ metadata:
   name: nginx-config
 data:
   nginx.conf: |
+    # nginx-unprivileged: runs as uid 101 with a read-only root filesystem, so the
+    # pid file and every temp path live under /tmp (an emptyDir).
+    pid /tmp/nginx.pid;
+    error_log /dev/stderr notice;
     events {}
     http {
+      access_log /dev/stdout;
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path       /tmp/proxy_temp;
+      fastcgi_temp_path     /tmp/fastcgi_temp;
+      uwsgi_temp_path       /tmp/uwsgi_temp;
+      scgi_temp_path        /tmp/scgi_temp;
+
+      # Re-resolve upstream names at runtime (the variable form of proxy_pass below)
+      # so a haproxy pod restart / new ClusterIP does not leave nginx pointing at a
+      # stale address. kube-dns is resolved once at startup; its Service IP is stable.
+      resolver kube-dns.kube-system.svc.cluster.local valid=10s ipv6=off;
+
       # Default catch-all server. Grafana and Argo CD are intentionally NOT
       # exposed here; reach them with kubectl port-forward.
       server {
-        listen 80 default_server;
+        listen 8080 default_server;
+        # Kubelet probe endpoint; answered locally, never proxied.
+        location = /healthz {
+          access_log off;
+          default_type text/plain;
+          return 200 "ok\n";
+        }
         # Do not expose Prometheus metrics publicly. Prometheus scrapes the
         # app pods directly on port 5000, so this does not affect scraping.
         location = /metrics {
           return 404;
         }
         location / {
+          # A variable without a URI part makes nginx forward the original request
+          # URI (path and query string) unchanged.
+          # FQDN required: nginx's resolver does no search-domain expansion. The
+          # FQDNs in this file assume namespace "default" (see argocd-app.yaml).
+          set $upstream http://haproxy.default.svc.cluster.local:8080;
           # Always overwritten, so clients cannot spoof it; HAProxy passes it through.
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header Host $host;
           proxy_set_header X-Forwarded-Proto $scheme;
-          proxy_pass http://haproxy:8080;
+          proxy_pass $upstream;
         }
       }
     }
@@ -30,7 +57,7 @@ kind: Deployment
 metadata:
   name: nginx
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: nginx
@@ -41,21 +68,78 @@ spec:
       annotations:
         # Config is mounted via subPath (no live reload): bump this whenever
         # the nginx-config ConfigMap changes so the pod restarts.
-        checksum/config: "1"
+        checksum/config: "3"
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        # ScheduleAnyway so rolling updates and single-node clusters never deadlock.
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: nginx
       containers:
       - name: nginx
-        image: nginx:1.25-alpine
+        image: nginxinc/nginx-unprivileged:1.28.2-alpine3.23
         ports:
-        - containerPort: 80
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 2
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
         volumeMounts:
         - name: config-volume
           mountPath: /etc/nginx/nginx.conf
           subPath: nginx.conf
+        - name: tmp
+          mountPath: /tmp
       volumes:
       - name: config-volume
         configMap:
           name: nginx-config
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nginx
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: nginx
 ---
 apiVersion: v1
 kind: Service
@@ -65,9 +149,10 @@ spec:
   selector:
     app: nginx
   ports:
-  - protocol: TCP
+  - name: http
+    protocol: TCP
     port: 80
-    targetPort: 80
+    targetPort: http
     # Pinned so host-side relays survive Service recreation. Outside the
     # 30001-30032 range used by the other fleet services.
     nodePort: 30080
@@ -87,28 +172,46 @@ data:
   haproxy.cfg: |
     global
         log stdout format raw local0
-    
+
     defaults
         log global
         mode http
         timeout connect 5000ms
         timeout client 50000ms
         timeout server 50000ms
-    
+
+    # Cluster DNS, taken from the pod's /etc/resolv.conf, so server addresses are
+    # re-resolved at runtime instead of being frozen at startup.
+    resolvers kubedns
+        parse-resolv-conf
+        resolve_retries 3
+        timeout resolve 1s
+        timeout retry 1s
+        hold valid 10s
+
+    # Kubelet probe endpoint on its own port: it is never exposed by the Service and
+    # cannot shadow an application route.
+    frontend healthz
+        bind *:8081
+        monitor-uri /healthz
+
     frontend http_front
         bind *:8080
         default_backend http_back
-    
+
     backend http_back
         balance roundrobin
-        server app1 app-service:80 check
+        # FQDN required: parse-resolv-conf imports nameservers only, not search domains.
+        # Assumes namespace "default" (see argocd-app.yaml).
+        # init-addr last,libc,none: start even if the name does not resolve yet.
+        server app1 app-service.default.svc.cluster.local:80 check resolvers kubedns init-addr last,libc,none
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: haproxy
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: haproxy
@@ -116,12 +219,60 @@ spec:
     metadata:
       labels:
         app: haproxy
+      annotations:
+        # Config is mounted via subPath (no live reload): bump this whenever
+        # the haproxy-config ConfigMap changes so the pods restart.
+        checksum/config: "2"
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 99
+        runAsGroup: 99
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: haproxy
       containers:
       - name: haproxy
-        image: haproxy:2.9
+        image: haproxy:3.2.25-alpine
         ports:
-        - containerPort: 8080
+        - name: http
+          containerPort: 8080
+        - name: health
+          containerPort: 8081
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 2
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
         volumeMounts:
         - name: config-volume
           mountPath: /usr/local/etc/haproxy/haproxy.cfg
@@ -131,6 +282,16 @@ spec:
         configMap:
           name: haproxy-config
 ---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: haproxy
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: haproxy
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -139,6 +300,7 @@ spec:
   selector:
     app: haproxy
   ports:
-  - protocol: TCP
+  - name: http
+    protocol: TCP
     port: 8080
-    targetPort: 8080
+    targetPort: http

@@ -1,6 +1,7 @@
 # NetworkPolicies for the default namespace. Selectors match the pod-template
-# labels app=app, app=redis, app=haproxy, app=prometheus, app=redis-exporter in
-# the other manifests. node-exporter uses hostNetwork, which NetworkPolicy does not cover.
+# labels app=app, app=redis, app=haproxy, app=prometheus, app=redis-exporter,
+# app=loki, app=promtail and app=grafana in the other manifests. node-exporter
+# uses hostNetwork, which NetworkPolicy does not cover.
 # Kubelet liveness/readiness probes originate from the node and are not subject
 # to NetworkPolicy on mainstream CNIs (Calico, Cilium, etc.), so probes keep working.
 # Requires a CNI that enforces NetworkPolicy; otherwise these are silently ignored.
@@ -63,3 +64,27 @@ spec:
     ports:
     - protocol: TCP
       port: 9121
+---
+# Loki runs with auth_enabled: false, so restrict who can push and query:
+# Promtail pushes logs, Grafana queries them. Ring/gRPC traffic stays on
+# loopback (instance_addr 127.0.0.1) and is unaffected.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loki-allow-promtail-grafana
+spec:
+  podSelector:
+    matchLabels:
+      app: loki
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: promtail
+    - podSelector:
+        matchLabels:
+          app: grafana
+    ports:
+    - protocol: TCP
+      port: 3100

@@ -199,13 +199,5 @@ tooling relies on it (`kubectl config use-context <previous>`).
 
 ## Known gaps found while planning
 
-1. **Missing exporters** — `k8s/monitoring.yaml` scrapes `node-exporter:9100`
-   and `redis-exporter:9121`, but neither is defined in `k8s/`. Those targets
-   show `down` locally and in production. Either add the exporters (Redis
-   exporter needs the `redis-auth` secret and a NetworkPolicy rule) or remove
-   the scrape jobs.
-2. **No Grafana provisioning** — no datasource or dashboard is provisioned, so
-   in tier 3 add Prometheus (`http://prometheus:9090`) and Loki
-   (`http://loki:3100`) by hand. Loki has no log shipper feeding it.
-3. **Secrets setup is undocumented in the repo** — the commands in tier 3
+1. **Secrets setup is undocumented in the repo** — the commands in tier 3
    step 3 are the reference until a README exists.

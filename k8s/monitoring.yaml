@@ -23,6 +23,8 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: prometheus
+  # The API server rejects a ServiceAccount subject without a namespace, and Argo CD
+  # does not inject one into subjects, so this must stay (it is the Argo destination).
   namespace: default
 ---
 apiVersion: v1
@@ -43,7 +45,7 @@ data:
         kubernetes_sd_configs:
           - role: pod
             namespaces:
-              names: [default]
+              own_namespace: true
         relabel_configs:
           - source_labels: [__meta_kubernetes_pod_label_app]
             regex: node-exporter
@@ -71,7 +73,7 @@ data:
         kubernetes_sd_configs:
           - role: pod
             namespaces:
-              names: [default]
+              own_namespace: true
         relabel_configs:
           - source_labels: [__meta_kubernetes_pod_label_app]
             regex: app
@@ -85,12 +87,26 @@ data:
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: instance
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: prometheus
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: prometheus
@@ -101,22 +117,76 @@ spec:
       annotations:
         # Config is mounted via subPath (no live reload): bump this whenever
         # the prometheus-config ConfigMap changes so the pod restarts.
-        checksum/config: "3"
+        checksum/config: "4"
     spec:
       serviceAccountName: prometheus
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: prometheus
         image: prom/prometheus:v2.49.0
+        # Setting args replaces the image's default CMD, so every default flag is repeated.
+        args:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+        - --storage.tsdb.retention.time=15d
+        # ~80% of the 10Gi PVC, leaving room for the WAL and compaction.
+        - --storage.tsdb.retention.size=8GB
+        - --web.console.libraries=/usr/share/prometheus/console_libraries
+        - --web.console.templates=/usr/share/prometheus/consoles
         ports:
-        - containerPort: 9090
+        - name: http
+          containerPort: 9090
+        startupProbe:
+          httpGet:
+            path: /-/healthy
+            port: http
+          periodSeconds: 5
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
         volumeMounts:
         - name: config-volume
           mountPath: /etc/prometheus/prometheus.yml
           subPath: prometheus.yml
+        - name: data
+          mountPath: /prometheus
       volumes:
       - name: config-volume
         configMap:
           name: prometheus-config
+      - name: data
+        persistentVolumeClaim:
+          claimName: prometheus-data
 ---
 apiVersion: v1
 kind: Service
@@ -126,10 +196,45 @@ spec:
   selector:
     app: prometheus
   ports:
-  - protocol: TCP
+  - name: http
+    protocol: TCP
     port: 9090
-    targetPort: 9090
+    targetPort: http
   type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+      - name: Loki
+        uid: loki
+        type: loki
+        access: proxy
+        url: http://loki:3100
+        editable: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -137,6 +242,8 @@ metadata:
   name: grafana
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: grafana
@@ -144,15 +251,28 @@ spec:
     metadata:
       labels:
         app: grafana
+      annotations:
+        # Datasources are provisioned at startup only: bump when grafana-datasources changes.
+        checksum/config: "1"
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: grafana
         image: grafana/grafana-oss:10.2.2
         ports:
-        - containerPort: 3000
+        - name: http
+          containerPort: 3000
         env:
         # Credentials come from a Secret created out-of-band (never in git):
         # see the kubectl create secret command in the PR description.
+        # NOTE: with a persistent /var/lib/grafana these only seed the admin user on
+        # first database initialisation; later Secret changes do not alter the password.
         - name: GF_SECURITY_ADMIN_USER
           valueFrom:
             secretKeyRef:
@@ -165,6 +285,51 @@ spec:
               key: admin-password
         - name: GF_USERS_ALLOW_SIGN_UP
           value: "false"
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/grafana
+        - name: datasources
+          mountPath: /etc/grafana/provisioning/datasources
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: grafana-data
+      - name: datasources
+        configMap:
+          name: grafana-datasources
+      - name: tmp
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -174,10 +339,71 @@ spec:
   selector:
     app: grafana
   ports:
-  - protocol: TCP
+  - name: http
+    protocol: TCP
     port: 3000
-    targetPort: 3000
+    targetPort: http
   type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+data:
+  loki.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9096
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+    schema_config:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    ingester:
+      wal:
+        dir: /loki/wal
+    storage_config:
+      tsdb_shipper:
+        active_index_directory: /loki/tsdb-index
+        cache_location: /loki/tsdb-cache
+    compactor:
+      working_directory: /loki/compactor
+      retention_enabled: true
+      delete_request_store: filesystem
+      retention_delete_delay: 2h
+    limits_config:
+      retention_period: 168h
+    analytics:
+      reporting_enabled: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-data
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      # Loki retention is time-based only (168h); size this above a week of logs.
+      storage: 50Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -185,6 +411,8 @@ metadata:
   name: loki
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: loki
@@ -192,12 +420,74 @@ spec:
     metadata:
       labels:
         app: loki
+      annotations:
+        # Loki reads its config only at startup: bump when loki-config changes.
+        checksum/config: "1"
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: loki
-        image: grafana/loki:2.9.0
+        image: grafana/loki:3.6.11
+        args:
+        - -config.file=/etc/loki/loki.yaml
         ports:
-        - containerPort: 3100
+        - name: http
+          containerPort: 3100
+        startupProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 5
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        - name: config
+          mountPath: /etc/loki
+          readOnly: true
+        - name: data
+          mountPath: /loki
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: config
+        configMap:
+          name: loki-config
+      - name: data
+        persistentVolumeClaim:
+          claimName: loki-data
+      - name: tmp
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -207,9 +497,10 @@ spec:
   selector:
     app: loki
   ports:
-  - protocol: TCP
+  - name: http
+    protocol: TCP
     port: 3100
-    targetPort: 3100
+    targetPort: http
 ---
 # Host metrics, one pod per node. hostNetwork is required for host network
 # stats (/proc/net is per network namespace); it also means :9100 listens on
@@ -236,6 +527,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: node-exporter
         image: prom/node-exporter:v1.12.1
@@ -251,6 +544,16 @@ spec:
           httpGet:
             path: /
             port: metrics
+          periodSeconds: 10
+          timeoutSeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /
+            port: metrics
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 3
+          failureThreshold: 6
         resources:
           requests:
             cpu: 20m
@@ -300,6 +603,12 @@ spec:
         app: redis-exporter
     spec:
       automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 59000
+        runAsGroup: 59000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: redis-exporter
         image: oliver006/redis_exporter:v1.93.0
@@ -318,6 +627,16 @@ spec:
           httpGet:
             path: /health
             port: metrics
+          periodSeconds: 10
+          timeoutSeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: metrics
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 3
+          failureThreshold: 6
         resources:
           requests:
             cpu: 10m

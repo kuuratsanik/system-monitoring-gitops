@@ -12,12 +12,17 @@ spec:
       labels:
         app: app
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: app
         # Built and pushed by .github/workflows/app-image.yml on every push to main;
         # its deploy job rewrites this tag (and APP_VERSION) to sha-<commit> so Argo CD rolls the pods.
         image: ghcr.io/kuuratsanik/system-monitoring-app:sha-54790567a05a72f94d206f77423ef778e9b4df61
-        imagePullPolicy: Always
         ports:
         - name: http
           containerPort: 5000
@@ -63,6 +68,28 @@ spec:
           limits:
             cpu: 500m
             memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        # gunicorn keeps worker heartbeat files in /tmp.
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: app
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: app
 ---
 apiVersion: v1
 kind: Service

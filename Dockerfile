@@ -1,12 +1,13 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY src/server/requirements.txt /app/src/server/requirements.txt
-RUN pip install --no-cache-dir -r /app/src/server/requirements.txt
+# Hash-pinned lock (generated from requirements.txt); see the header of that file.
+COPY src/server/requirements.lock /app/src/server/requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /app/src/server/requirements.lock
 
 COPY src/server /app/src/server
 COPY src/client /app/src/client
