@@ -66,6 +66,12 @@
     return n;
   }
 
+  function formatWait(n) {
+    if (typeof n !== 'number' || !isFinite(n) || n <= 0) return 'shortly';
+    if (n >= 60) return 'in ' + Math.ceil(n / 60) + ' min';
+    return 'in ' + n + ' s';
+  }
+
   function fetchJson(url, opts) {
     var ctrl = new AbortController();
     var t = setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS);
@@ -151,7 +157,7 @@
         setText(el.msg, 'Visit recorded.');
         return fetchStatus({ soft: true }).then(function () { return null; });
       } else if (r.status === 429) {
-        setText(el.msg, 'Too many visits — try again in a minute.');
+        setText(el.msg, 'Too many visits — try again ' + formatWait(r.retryAfter) + '.');
         return r.retryAfter;
       } else if (r.status === 503) {
         var err = (r.body && typeof r.body.error === 'string') ? r.body.error : '';
