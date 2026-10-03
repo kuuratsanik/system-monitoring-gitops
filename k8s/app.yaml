@@ -26,6 +26,8 @@ spec:
           value: redis
         - name: REDIS_PORT
           value: "6379"
+        - name: VISITS_CLIENT_IP_HEADER
+          value: X-Real-IP
         - name: APP_VERSION
           value: sha-a6395d2c657942849bf80ea51e316569335ad43f
         # Redis is a soft dependency: the app serves in degraded mode without it.
@@ -68,8 +70,4 @@ spec:
   - name: http
     protocol: TCP
     port: 80
-    targetPort: 5000
-  - name: metrics
-    protocol: TCP
-    port: 5000
     targetPort: 5000

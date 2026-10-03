@@ -66,19 +66,29 @@
     return n;
   }
 
+  function formatWait(n) {
+    if (typeof n !== 'number' || !isFinite(n) || n <= 0) return 'shortly';
+    if (n >= 60) return 'in ' + Math.ceil(n / 60) + ' min';
+    return 'in ' + n + ' s';
+  }
+
   function fetchJson(url, opts) {
     var ctrl = new AbortController();
     var t = setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS);
     opts = opts || {};
     opts.signal = ctrl.signal;
     opts.cache = 'no-store';
+    // Keep the timeout/abort alive until the body has been read (or failed).
     return fetch(url, opts).then(function (r) {
-      clearTimeout(t);
       var retryAfter = parseRetryAfter(r.headers.get('Retry-After'));
-      return r.json().catch(function () { return null; }).then(function (body) {
+      return r.json().catch(function (e) {
+        if (ctrl.signal.aborted) throw e; // timeout mid-body: surface as a network error
+        return null; // genuinely non-JSON body
+      }).then(function (body) {
         return { ok: r.ok, status: r.status, body: body, retryAfter: retryAfter };
       });
-    }, function (e) { clearTimeout(t); throw e; });
+    }).then(function (res) { clearTimeout(t); return res; },
+            function (e) { clearTimeout(t); throw e; });
   }
 
   function scheduleVisitRetry(seconds) {
@@ -151,7 +161,7 @@
         setText(el.msg, 'Visit recorded.');
         return fetchStatus({ soft: true }).then(function () { return null; });
       } else if (r.status === 429) {
-        setText(el.msg, 'Too many visits — try again in a minute.');
+        setText(el.msg, 'Too many visits — try again ' + formatWait(r.retryAfter) + '.');
         return r.retryAfter;
       } else if (r.status === 503) {
         var err = (r.body && typeof r.body.error === 'string') ? r.body.error : '';
@@ -160,7 +170,9 @@
           setText(el.msg, 'Could not record visit: Redis is unavailable.');
           return null;
         }
-        if (err === 'rate limit unavailable') {
+        if (err === 'visits store error') {
+          setText(el.msg, 'Could not record visit: storage error.');
+        } else if (err === 'rate limit unavailable') {
           setText(el.msg, 'Visit rate limiting is temporarily unavailable. Try again shortly.');
         } else {
           setText(el.msg, 'Could not record visit (HTTP 503).');

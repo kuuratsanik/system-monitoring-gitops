@@ -28,6 +28,8 @@ data:
       server {
         listen 80 default_server;
         location / {
+          # Always overwritten, so clients cannot spoof it; HAProxy passes it through.
+          proxy_set_header X-Real-IP $remote_addr;
           proxy_pass http://haproxy:8080;
         }
       }
@@ -73,6 +75,9 @@ spec:
     port: 80
     targetPort: 80
   type: LoadBalancer
+  # Preserve the client source IP (needed for per-IP rate limiting). Tradeoff:
+  # traffic is only routed to nodes that run an nginx pod.
+  externalTrafficPolicy: Local
 ---
 apiVersion: v1
 kind: ConfigMap
