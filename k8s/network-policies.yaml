@@ -1,5 +1,6 @@
 # NetworkPolicies for the default namespace. Selectors match the pod-template
-# labels app=app, app=redis, app=haproxy, app=prometheus in the other manifests.
+# labels app=app, app=redis, app=haproxy, app=prometheus, app=redis-exporter in
+# the other manifests. node-exporter uses hostNetwork, which NetworkPolicy does not cover.
 # Kubelet liveness/readiness probes originate from the node and are not subject
 # to NetworkPolicy on mainstream CNIs (Calico, Cilium, etc.), so probes keep working.
 # Requires a CNI that enforces NetworkPolicy; otherwise these are silently ignored.
@@ -17,6 +18,9 @@ spec:
     - podSelector:
         matchLabels:
           app: app
+    - podSelector:
+        matchLabels:
+          app: redis-exporter
     ports:
     - protocol: TCP
       port: 6379
@@ -41,3 +45,21 @@ spec:
     ports:
     - protocol: TCP
       port: 5000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-exporter-allow-prometheus
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-exporter
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 9121
