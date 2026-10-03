@@ -99,48 +99,6 @@ spec:
           mountPath: /run/redis-auth
         - name: tmp
           mountPath: /tmp
-      - name: redis-exporter
-        image: oliver006/redis_exporter:v1.93.0-alpine
-        ports:
-        - name: metrics
-          containerPort: 9121
-        env:
-        - name: REDIS_ADDR
-          value: localhost:6379
-        - name: REDIS_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: redis-auth
-              key: password
-        readinessProbe:
-          httpGet:
-            path: /
-            port: metrics
-          initialDelaySeconds: 5
-          periodSeconds: 10
-          timeoutSeconds: 3
-        livenessProbe:
-          httpGet:
-            path: /
-            port: metrics
-          initialDelaySeconds: 15
-          periodSeconds: 20
-          timeoutSeconds: 3
-          failureThreshold: 6
-        resources:
-          requests:
-            cpu: 25m
-            memory: 32Mi
-          limits:
-            cpu: 100m
-            memory: 64Mi
-        securityContext:
-          runAsUser: 59000
-          runAsGroup: 59000
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities:
-            drop: [ALL]
       volumes:
       - name: data
         persistentVolumeClaim:
@@ -163,16 +121,3 @@ spec:
     protocol: TCP
     port: 6379
     targetPort: redis
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis-exporter
-spec:
-  selector:
-    app: redis
-  ports:
-  - name: metrics
-    protocol: TCP
-    port: 9121
-    targetPort: metrics

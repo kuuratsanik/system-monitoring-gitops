@@ -19,4 +19,5 @@ WORKDIR /app/src/server
 EXPOSE 5000
 
 # One worker keeps Prometheus metrics coherent (they are per-process); threads give concurrency.
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", "--access-logfile", "-", "app:app"]
+# No control socket: it defaults to $HOME, which appuser does not have (--no-create-home).
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", "--no-control-socket", "--access-logfile", "-", "app:app"]
