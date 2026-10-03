@@ -150,7 +150,9 @@ production already covers. Optional step 10 adds it if needed.
    ```bash
    kubectl --context kind-sm-gitops wait --for=condition=Available deployment --all --timeout=180s
    ```
-7. **Port-forwards** (the `nginx` LoadBalancer stays `<pending>` on kind; that is expected):
+7. **Port-forwards.** nginx is a `NodePort` on 30080, so it is also reachable
+   directly at `http://<node-ip>:30080` (node IP from `docker inspect sm-gitops-control-plane`).
+   The port-forwards below keep the checklist addresses stable:
    ```bash
    kubectl --context kind-sm-gitops port-forward svc/nginx 18080:80
    ```
