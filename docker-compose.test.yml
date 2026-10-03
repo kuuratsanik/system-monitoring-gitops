@@ -1,0 +1,30 @@
+# Local smoke-test stack (loopback only). Not the full ArgoCD/k8s GitOps path.
+# See docs/LOCAL_TESTING.md (tier 2). SM_REDIS_PASSWORD comes from an untracked .env.
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: sm-gitops-redis
+    ports:
+      - "127.0.0.1:56379:6379"
+    mem_limit: 64m
+    cpus: 0.25
+    restart: "no"
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--requirepass", "${SM_REDIS_PASSWORD:?set in .env}"]
+
+  app:
+    build: .
+    image: sm-app:local
+    container_name: sm-gitops-app
+    ports:
+      - "127.0.0.1:5055:5000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: "${SM_REDIS_PASSWORD:?set in .env}"
+      APP_VERSION: local
+      VISITS_RATE_LIMIT: "5"
+    # Mirrors the k8s limits. No health condition: the app must boot with Redis down.
+    depends_on: [redis]
+    mem_limit: 256m
+    cpus: 0.5
+    restart: "no"
